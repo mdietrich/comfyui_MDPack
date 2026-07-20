@@ -1,0 +1,9 @@
+# Zusätzlich zu ComfyUIs eigenen Deps (torch, numpy sind schon da):
+open-clip-torch>=2.24.0
+# WICHTIG: headless-Variante auf Server/Docker (die GUI-Variante opencv-python
+# zieht GTK/GLX rein und kann auf headless-Hosts X-Fehler auslösen).
+opencv-python-headless>=4.9.0
+mediapipe>=0.10.9
+pillow>=10.0.0
+# optional (nur wenn check_persons genutzt wird):
+# ultralytics>=8.1.0
