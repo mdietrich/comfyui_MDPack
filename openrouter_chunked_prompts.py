@@ -18,8 +18,20 @@ class OpenRouterChunkedPrompts:
     Rationale: reasoning models (e.g. grok-4.3) have a soft output budget and
     silently deliver fewer/shorter items when asked for many long prompts at
     once. Small chunks keep every prompt at full length while the node
-    guarantees the total count. Each call uses JSON mode and receives the
-    previously generated prompts as a do-not-repeat list to keep variety.
+    guarantees the total count. Each call uses JSON mode and receives short
+    signatures of the previously generated prompts as a do-not-repeat list to
+    keep variety.
+
+    The node owns the output contract: it appends the CRITICAL OUTPUT
+    REQUIREMENT block (exact JSON shape, exact per-call count) as the very
+    last part of every call, so the instruction text does not need to state
+    it. If the instruction contains the <image_count> placeholder it is still
+    replaced per call with the chunk size for backwards compatibility.
+
+    When the request is split into several calls, each call also receives a
+    series context ("prompts i through j of N total") so that distribution
+    or percentage requirements in the instruction are understood as applying
+    to the whole series, not just the current chunk.
 
     The chunk size adapts to the requested prompt length: the expected words
     per prompt are parsed from the instruction (e.g. "between 150 and 200
@@ -27,8 +39,11 @@ class OpenRouterChunkedPrompts:
     call may carry, so chunk = words_per_call / expected words. Set
     expected_words_per_prompt > 0 to override the auto-detection.
 
-    The instruction input must contain the placeholder <image_count>; it is
-    replaced per call with the chunk size.
+    Optional inputs:
+      - seed: only forces re-execution (cache busting); it is never sent to
+        the LLM and does not influence the request payload.
+      - strict: raise an error when fewer than total_count prompts could be
+        generated instead of returning a short result with a warning.
 
     Outputs:
       1) "Prompts": all prompts joined with the ||| sentinel delimiter
@@ -68,6 +83,16 @@ class OpenRouterChunkedPrompts:
             },
             "optional": {
                 "image": ("IMAGE",),
+                "seed": ("INT", {
+                    "forceInput": True, "default": 0,
+                    "tooltip": "Cache-busting only: forces re-execution on "
+                               "change, never sent to the LLM.",
+                }),
+                "strict": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Raise an error if fewer than total_count "
+                               "prompts were generated.",
+                }),
             },
         }
 
@@ -113,6 +138,8 @@ class OpenRouterChunkedPrompts:
          lambda m: int(m.group(1)) * 1.2),
     ]
 
+    SIGNATURE_WORDS = 18
+
     @classmethod
     def detect_expected_words(cls, instruction):
         for pattern, extract in cls.WORD_PATTERNS:
@@ -121,14 +148,31 @@ class OpenRouterChunkedPrompts:
                 return extract(m)
         return None
 
+    @classmethod
+    def prompt_signature(cls, prompt):
+        words = prompt.split()
+        signature = " ".join(words[:cls.SIGNATURE_WORDS])
+        if len(words) > cls.SIGNATURE_WORDS:
+            signature += " ..."
+        return signature
+
+    @staticmethod
+    def output_contract(n):
+        return (
+            "\n\nCRITICAL OUTPUT REQUIREMENT: Respond with ONLY a valid JSON "
+            'object of the form {"prompts": ["...", "..."]} where the array '
+            f"contains EXACTLY {n} prompt strings. An array with fewer than "
+            f"{n} entries is a failed response. Do not stop early; only "
+            f"finish after prompt number {n} is complete."
+        )
+
     def generate(self, api_key, system_prompt, instruction, total_count,
                  words_per_call, expected_words_per_prompt, model, temperature,
-                 image=None):
+                 image=None, seed=0, strict=False):
+        # `seed` is intentionally unused: it only makes ComfyUI re-execute
+        # this node when the connected seed changes.
         if not api_key:
             raise ValueError("OpenRouterChunkedPrompts: API key not provided.")
-        if "<image_count>" not in instruction:
-            print("OpenRouterChunkedPrompts: warning - instruction contains no "
-                  "<image_count> placeholder; chunk sizes cannot be injected.")
 
         if int(expected_words_per_prompt) > 0:
             expected = float(expected_words_per_prompt)
@@ -163,14 +207,26 @@ class OpenRouterChunkedPrompts:
         while len(prompts) < total and calls < max_calls:
             n = min(chunk, total - len(prompts))
             text = instruction.replace("<image_count>", str(n))
-            if prompts:
-                seen = "\n- ".join(p[:250] for p in prompts)
+            if total > n:
+                done = len(prompts)
                 text += (
-                    "\n\nYou have already generated the prompts listed below in previous "
-                    "batches. The new prompts must be clearly different from ALL of them: "
-                    "use different poses, activities, and compositions. Do not repeat or "
-                    "closely paraphrase any of them.\nAlready generated:\n- " + seen
+                    f"\n\nSERIES CONTEXT: You are now generating prompts "
+                    f"{done + 1} through {done + n} of {total} total prompts. "
+                    f"Any distribution, variety, or percentage requirements in "
+                    f"the instructions above apply across the whole series of "
+                    f"{total} prompts, so cover a representative share of that "
+                    f"range in this batch."
                 )
+            if prompts:
+                seen = "\n- ".join(self.prompt_signature(p) for p in prompts)
+                text += (
+                    "\n\nYou have already generated prompts starting as listed "
+                    "below in previous batches. The new prompts must be clearly "
+                    "different from ALL of them: use different poses, "
+                    "activities, and compositions. Do not repeat or closely "
+                    "paraphrase any of them.\nAlready generated:\n- " + seen
+                )
+            text += self.output_contract(n)
 
             content_blocks = [{"type": "text", "text": text}]
             if image_b64 is not None:
@@ -234,6 +290,12 @@ class OpenRouterChunkedPrompts:
         if len(prompts) < total:
             stats.append(f"WARNING: only {len(prompts)}/{total} prompts after {calls} calls")
             print(f"OpenRouterChunkedPrompts: {stats[-1]}")
+            if strict:
+                raise RuntimeError(
+                    f"OpenRouterChunkedPrompts: strict mode - only "
+                    f"{len(prompts)}/{total} prompts after {calls} calls:\n"
+                    + "\n".join(stats)
+                )
 
         prompts = prompts[:total]
         return ("|||".join(prompts), "\n".join(stats))
