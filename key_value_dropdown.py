@@ -21,13 +21,20 @@ class KeyValueDropdown:
                     "tooltip": "One 'key = integer' pair per line. "
                                "Lines starting with # are ignored.",
                 }),
-                "selection": ("STRING", {
+                "selection": (["Low", "Medium", "High"], {
                     "default": "Low",
                     "tooltip": "The selected key; shown as a dropdown of the "
                                "mapping keys.",
                 }),
             }
         }
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, selection):
+        # The dropdown options are rebuilt dynamically in the frontend from
+        # the mapping text, so the static combo list above must not be
+        # enforced; select() validates against the actual mapping.
+        return True
 
     RETURN_TYPES = ("INT", "STRING")
     RETURN_NAMES = ("value", "key")
