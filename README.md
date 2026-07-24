@@ -10,6 +10,7 @@ Personal collection of custom nodes for [ComfyUI](https://github.com/comfyanonym
 | Hand/Foot Montage | `hand_foot_montage.py` | Builds montage crops of hands/feet for detail inspection |
 | JSON → Text | `json_to_text.py` | Extracts text fields from JSON payloads |
 | OpenRouter Chunked Prompts | `openrouter_chunked_prompts.py` | Generates large prompt batches via the OpenRouter API using JSON mode with adaptive chunking, bypassing output-token limits |
+| Key-Value Dropdown | `key_value_dropdown.py` | User-defined `key = integer` pairs shown as a dropdown; outputs the selected value and key. Mapping textarea is collapsed by default (Edit mapping toggle) |
 
 ## Installation
 

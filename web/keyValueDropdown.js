@@ -17,6 +17,29 @@ function getWidgets(node) {
     return mappingWidget && selectionWidget ? { mappingWidget, selectionWidget } : null;
 }
 
+// Show or hide the mapping textarea. The visibility is stored in a node
+// property so it survives save/reload; the button widget itself is not
+// serialized.
+function setMappingVisible(node, visible) {
+    const widgets = getWidgets(node);
+    if (!widgets) return;
+    const wasVisible = widgets.mappingWidget.hidden !== true;
+    widgets.mappingWidget.hidden = !visible;
+    node.properties.showMapping = visible;
+    const toggleWidget = node.widgets?.find((w) => w.name === "mapping_toggle");
+    if (toggleWidget) {
+        toggleWidget.label = visible ? "Hide mapping ▴" : "Edit mapping ▾";
+    }
+    // Only resize on an actual visibility change (keeps a user-resized node
+    // intact when the state is re-applied after workflow load), and preserve
+    // the current width.
+    if (wasVisible !== visible) {
+        const computedSize = node.computeSize();
+        node.setSize([Math.max(node.size[0], computedSize[0]), computedSize[1]]);
+    }
+    node.graph?.setDirtyCanvas(true, true);
+}
+
 // Rebuild the dropdown option list from the mapping text.
 function updateOptions(node) {
     const widgets = getWidgets(node);
@@ -46,6 +69,18 @@ app.registerExtension({
             if (this.properties?.mapping === undefined) {
                 this.addProperty("mapping", mappingWidget.value, "string");
             }
+            if (this.properties?.showMapping === undefined) {
+                this.addProperty("showMapping", false, "boolean");
+            }
+
+            // Toggle button sits below the selection dropdown; the mapping
+            // textarea is hidden by default and only shown on demand.
+            const toggleWidget = this.addWidget("button", "mapping_toggle", null, () => {
+                setMappingVisible(this, !this.properties.showMapping);
+            });
+            toggleWidget.serialize = false;
+            if (toggleWidget.options) toggleWidget.options.serialize = false;
+            setMappingVisible(this, this.properties.showMapping === true);
             const originalCallback = mappingWidget.callback;
             mappingWidget.callback = (value, ...rest) => {
                 this.properties.mapping = value;
@@ -76,6 +111,7 @@ app.registerExtension({
             if (widgets) {
                 this.properties.mapping = widgets.mappingWidget.value;
                 updateOptions(this);
+                setMappingVisible(this, this.properties.showMapping === true);
             }
             return result;
         };
