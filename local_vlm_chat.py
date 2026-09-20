@@ -118,19 +118,39 @@ class LocalVLMChat:
         except (TypeError, ValueError):
             self.processor = AutoProcessor.from_pretrained(checkpoint)
 
+        # A checkpoint saved after quantization carries its own config; passing
+        # another one on top of it fails.
+        import json
+        with open(os.path.join(checkpoint, "config.json")) as handle:
+            prequantized = "quantization_config" in json.load(handle)
+
         quant_config = None
-        if quantization == "4bit":
-            quant_config = BitsAndBytesConfig(load_in_4bit=True)
+        if prequantized:
+            print("LocalVLMChat: checkpoint is pre-quantized, ignoring the "
+                  "quantization input")
+        elif quantization == "4bit":
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.bfloat16)
         elif quantization == "8bit":
             quant_config = BitsAndBytesConfig(load_in_8bit=True)
 
         device = self.device()
         bf16 = (torch.cuda.is_available()
                 and torch.cuda.get_device_capability(device)[0] >= 8)
+        load_kwargs = {
+            "dtype": torch.bfloat16 if bf16 else torch.float16,
+            "device_map": "auto",
+            "attn_implementation": attention,
+        }
+        # Only pass the kwarg when we have one: an explicit None suppresses the
+        # quantization_config a pre-quantized checkpoint carries in its config,
+        # so the model gets built unquantized and the 4bit weights do not fit.
+        if quant_config is not None:
+            load_kwargs["quantization_config"] = quant_config
         self.model = AutoModelForImageTextToText.from_pretrained(
-            checkpoint, dtype=torch.bfloat16 if bf16 else torch.float16,
-            device_map="auto", attn_implementation=attention,
-            quantization_config=quant_config)
+            checkpoint, **load_kwargs)
         self.model.eval()
         self.loaded_key = key
         print("LocalVLMChat: loaded %s (%s, %s)" % (model, quantization, attention))
