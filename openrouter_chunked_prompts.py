@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import math
+import random
 import re
 import time
 
@@ -39,9 +40,19 @@ class OpenRouterChunkedPrompts:
     call may carry, so chunk = words_per_call / expected words. Set
     expected_words_per_prompt > 0 to override the auto-detection.
 
+    Identical requests make a model fall back to its favourite scenes, so
+    repeated runs deliver near-identical batches. To break that, the node
+    draws one option per diversity axis per prompt, deterministically from
+    the seed, and appends the drawn combination as a per-prompt directive
+    line. A different seed therefore yields a genuinely different batch.
+
     Optional inputs:
-      - seed: only forces re-execution (cache busting); it is never sent to
-        the LLM and does not influence the request payload.
+      - seed: drives the diversity draw and forces re-execution. The prompt
+        text itself is never sent as a number to the model; only the drawn
+        axis values and a variation marker are.
+      - diversity_axes: one axis per line as "Label: option | option | ...".
+        Empty falls back to DEFAULT_DIVERSITY_AXES; a single "-" disables
+        the directives entirely.
       - strict: raise an error when fewer than total_count prompts could be
         generated instead of returning a short result with a warning.
 
@@ -64,7 +75,11 @@ class OpenRouterChunkedPrompts:
                     "default": "You are a helpful assistant."
                 }),
                 "instruction": ("STRING", {"forceInput": True}),
-                "total_count": ("INT", {"default": 20, "min": 1, "max": 200}),
+                "total_count": ("INT", {
+                    "default": 20, "min": 0, "max": 200,
+                    "tooltip": "0 disables this node: it returns an empty "
+                               "result without calling the API.",
+                }),
                 "words_per_call": ("INT", {
                     "default": 900, "min": 100, "max": 5000,
                     "tooltip": "Content budget (words) per API call; keeps each "
@@ -92,6 +107,14 @@ class OpenRouterChunkedPrompts:
                     "default": False,
                     "tooltip": "Raise an error if fewer than total_count "
                                "prompts were generated.",
+                }),
+                "diversity_axes": ("STRING", {
+                    "multiline": True, "default": "",
+                    "tooltip": "One axis per line: 'Label: option | option | "
+                               "option'. One option per axis is drawn per "
+                               "prompt from the seed and handed to the model "
+                               "as a directive. Empty = built-in axes, "
+                               "'-' = no directives.",
                 }),
             },
         }
@@ -140,6 +163,82 @@ class OpenRouterChunkedPrompts:
 
     SIGNATURE_WORDS = 18
 
+    DEFAULT_DIVERSITY_AXES = (
+        "Setting: indoor domestic | indoor public | workplace or studio | "
+        "outdoor urban | outdoor nature | transit or vehicle | "
+        "water or poolside | nightlife or event\n"
+        "Time of day: early morning | midday | afternoon | golden hour | "
+        "blue hour | night\n"
+        "Light: hard direct sunlight | overcast diffuse | window light | "
+        "practical lamps | neon or colored light | camera flash\n"
+        "Framing: wide establishing shot | full body | medium shot | "
+        "close-up | over-the-shoulder | low angle | high angle\n"
+        "Energy: still and calm | casual everyday action | focused activity | "
+        "dynamic movement"
+    )
+
+    @classmethod
+    def parse_diversity_axes(cls, raw):
+        """Parse "Label: a | b | c" lines into [(label, [options])]."""
+        text = (raw or "").strip()
+        if text == "-":
+            return []
+        if not text:
+            text = cls.DEFAULT_DIVERSITY_AXES
+        axes = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            label, _, options_part = line.partition(":")
+            options = [o.strip() for o in options_part.split("|") if o.strip()]
+            if label.strip() and options:
+                axes.append((label.strip(), options))
+        return axes
+
+    @classmethod
+    def diversity_directives(cls, axes, seed, first_index, count, total):
+        """Draw one option per axis per prompt, deterministic in (seed, index).
+
+        Returns an empty string when no axes are configured: the seed alone
+        already busts the cache, and any marker text (e.g. a seed number)
+        risks being copied verbatim into the prompts and rendered as text
+        in the image.
+        """
+        if not axes:
+            return ""
+        lines = []
+        for offset in range(count):
+            index = first_index + offset
+            rng = random.Random(f"{int(seed)}:{index}")
+            drawn = "; ".join(
+                f"{label} = {rng.choice(options)}" for label, options in axes
+            )
+            lines.append(f"- prompt {offset + 1}: {drawn}")
+        return (
+            "\n\nPER-PROMPT DIRECTIVES (internal planning notes, not prompt "
+            "content): every prompt in this batch must follow its own line "
+            "below. The directives fix those axes; everything else stays your "
+            "creative choice. They override your default preferences, so do "
+            "not fall back to recurring favourite scenes. Never quote these "
+            "notes, their labels, or any numbers in the prompt text itself; "
+            "express the drawn values only as natural visual description:\n"
+            + "\n".join(lines)
+        )
+
+    LEAK_PATTERN = re.compile(
+        r"[\s,;:(-]*\b(?:variation\s+(?:marker|directives?)|per-prompt\s+directives?)\b"
+        r"[^.\n]*(?:\.|(?=\n)|$)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def scrub_leaks(cls, prompt):
+        """Remove directive wording a model copied into a prompt."""
+        cleaned = cls.LEAK_PATTERN.sub(" ", prompt)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+        return cleaned
+
     @classmethod
     def detect_expected_words(cls, instruction):
         for pattern, extract in cls.WORD_PATTERNS:
@@ -168,9 +267,13 @@ class OpenRouterChunkedPrompts:
 
     def generate(self, api_key, system_prompt, instruction, total_count,
                  words_per_call, expected_words_per_prompt, model, temperature,
-                 image=None, seed=0, strict=False):
-        # `seed` is intentionally unused: it only makes ComfyUI re-execute
-        # this node when the connected seed changes.
+                 image=None, seed=0, strict=False, diversity_axes=""):
+
+        # A disabled node must not touch the network or require credentials;
+        # the workflow uses total_count=0 to switch off a whole prompt branch.
+        if int(total_count) == 0:
+            return ("", "disabled: total_count=0")
+
         if not api_key:
             raise ValueError("OpenRouterChunkedPrompts: API key not provided.")
 
@@ -192,6 +295,7 @@ class OpenRouterChunkedPrompts:
         }
 
         image_b64 = self.image_to_base64(image) if image is not None else None
+        axes = self.parse_diversity_axes(diversity_axes)
 
         total = max(1, int(total_count))
         chunk = max(1, int(chunk_size))
@@ -199,7 +303,8 @@ class OpenRouterChunkedPrompts:
         prompts = []
         stats = [
             f"chunk_size={chunk} ({expected_src}: ~{expected:.0f} words/prompt, "
-            f"budget {int(words_per_call)} words/call)"
+            f"budget {int(words_per_call)} words/call)",
+            f"diversity: {len(axes)} axes, seed={int(seed)}",
         ]
         print(f"OpenRouterChunkedPrompts: {stats[0]}")
         calls = 0
@@ -226,6 +331,8 @@ class OpenRouterChunkedPrompts:
                     "activities, and compositions. Do not repeat or closely "
                     "paraphrase any of them.\nAlready generated:\n- " + seen
                 )
+            text += self.diversity_directives(
+                axes, seed, len(prompts) + 1, n, total)
             text += self.output_contract(n)
 
             content_blocks = [{"type": "text", "text": text}]
@@ -245,6 +352,10 @@ class OpenRouterChunkedPrompts:
                 "temperature": float(temperature),
                 "response_format": {"type": "json_object"},
             }
+            if int(seed):
+                # Providers that honour it sample differently per seed; those
+                # that ignore it are already covered by the directives above.
+                payload["seed"] = int(seed) & 0x7FFFFFFF
 
             calls += 1
             start = time.time()
@@ -264,7 +375,8 @@ class OpenRouterChunkedPrompts:
                     usage_note = f", completion_tokens={usage.get('completion_tokens')}"
                     try:
                         arr = json.loads(content).get("prompts", [])
-                        got = [str(p).strip() for p in arr if str(p).strip()]
+                        got = [self.scrub_leaks(str(p)) for p in arr if str(p).strip()]
+                        got = [p for p in got if p]
                     except Exception:
                         usage_note += (
                             f", BAD CONTENT: finish={choice.get('finish_reason')}"

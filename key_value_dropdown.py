@@ -8,7 +8,8 @@ class KeyValueDropdown:
     the mapping keys and mirrors `mapping` into a node property so the pairs
     can also be edited via the properties panel.
 
-    Outputs: the integer assigned to the selected key, and the key itself.
+    Outputs: the integer assigned to the selected key, the key itself, and the
+    raw mapping text (so downstream nodes can resolve the other keys).
     """
 
     @classmethod
@@ -36,8 +37,8 @@ class KeyValueDropdown:
         # enforced; select() validates against the actual mapping.
         return True
 
-    RETURN_TYPES = ("INT", "STRING")
-    RETURN_NAMES = ("value", "key")
+    RETURN_TYPES = ("INT", "STRING", "STRING")
+    RETURN_NAMES = ("value", "key", "mapping")
     FUNCTION = "select"
     CATEGORY = "MDPack"
 
@@ -80,7 +81,7 @@ class KeyValueDropdown:
                 f"KeyValueDropdown: selection '{key}' not found in mapping "
                 f"(available: {', '.join(pairs)})"
             )
-        return (pairs[key], key)
+        return (pairs[key], key, mapping)
 
 
 NODE_CLASS_MAPPINGS = {
