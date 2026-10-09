@@ -11,6 +11,24 @@ function configuration(workflow) {
     return settings;
 }
 
+function cacheScope(workflowId, project) {
+    if (typeof workflowId !== "string" || !workflowId.trim() || typeof project !== "string" || !project.trim()) return null;
+    return JSON.stringify([workflowId, project]);
+}
+
+function promptScope(prompt, settings) {
+    const projectId = settings.project ?? 212;
+    const projectNode = prompt.workflow.nodes?.find((node) => String(node.id) === String(projectId));
+    // Positional widget values are the serialized source; named values may be stale.
+    const hasPositionalProject = Object.prototype.hasOwnProperty.call(projectNode?.widgets_values ?? {}, 0);
+    const hasSerializedProject = hasPositionalProject || Object.prototype.hasOwnProperty.call(projectNode?.widgets_values_named ?? {}, "value");
+    const serializedProject = hasPositionalProject ? projectNode.widgets_values[0] : projectNode?.widgets_values_named?.value;
+    if (hasSerializedProject && (typeof serializedProject !== "string" || !serializedProject.trim())) return null;
+    const outputProject = prompt.output[projectId]?.inputs?.value;
+    if (serializedProject !== undefined && outputProject !== undefined && serializedProject !== outputProject) return null;
+    return cacheScope(prompt.workflow.id, hasSerializedProject ? serializedProject : outputProject);
+}
+
 function preparePrompt(prompt) {
     const settings = configuration(prompt?.workflow);
     if (!settings || !prompt.output) return { prompt, settings: null, generating: false };
@@ -42,7 +60,7 @@ function preparePrompt(prompt) {
             _h3_prompt_cache_nonce: crypto.getRandomValues(new Uint32Array(4)).join("-"),
         } };
     }
-    return { prompt: { ...prompt, output }, settings, generating };
+    return { prompt: { ...prompt, output }, settings, generating, scope: promptScope(prompt, settings) };
 }
 
 function exactText(output) {
@@ -53,13 +71,16 @@ function exactText(output) {
 export function installPromptCache(application, serverApi) {
     const jobs = new Map();
     const earlyEvents = new Map();
-    const latestSuccessByWorkflow = new Map();
+    const latestSuccessByScope = new Map();
     let nextEventOrder = 0;
     let pendingCount = 0;
     function applyCachedSuccess() {
         const settings = configuration({extra: application.graph?.extra});
         if (!settings) return;
-        const success = latestSuccessByWorkflow.get(settings.workflow_id);
+        const project = application.graph.getNodeById(settings.project ?? 212)?.widgets?.find((item) => item.name === "value")?.value;
+        const scope = cacheScope(application.graph.id, project);
+        if (!scope) return;
+        const success = latestSuccessByScope.get(scope);
         const cacheNode = application.graph.getNodeById(settings.cache);
         const widget = cacheNode?.widgets?.find((item) => item.name === "value");
         if (!success || !widget || widget.value === success.text) return;
@@ -80,7 +101,7 @@ export function installPromptCache(application, serverApi) {
         try {
             const response = await originalQueuePrompt.call(this, index, prepared.prompt, ...arguments_);
             if (prepared.generating && response?.prompt_id) {
-                jobs.set(response.prompt_id, { settings: prepared.settings, text: null, stats: null, textOrder: 0, statsOrder: 0 });
+                jobs.set(response.prompt_id, { settings: prepared.settings, scope: prepared.scope, text: null, stats: null, textOrder: 0, statsOrder: 0 });
                 for (const event of earlyEvents.get(response.prompt_id) ?? []) handleEvent(event.kind, event.detail, event.order);
                 earlyEvents.delete(response.prompt_id);
             }
@@ -108,9 +129,10 @@ export function installPromptCache(application, serverApi) {
         const text = job.text;
         jobs.delete(detail.prompt_id);
         if (!text.trim() || ERROR_PREFIX.test(text.trimStart()) || !/^TPS:\s*\d/.test(job.stats)) return;
+        if (!job.scope) return;
         const completionOrder = Math.max(job.textOrder, job.statsOrder);
-        if ((latestSuccessByWorkflow.get(job.settings.workflow_id)?.order ?? -1) > completionOrder) return;
-        latestSuccessByWorkflow.set(job.settings.workflow_id, {text, order: completionOrder});
+        if ((latestSuccessByScope.get(job.scope)?.order ?? -1) > completionOrder) return;
+        latestSuccessByScope.set(job.scope, {text, order: completionOrder});
         applyCachedSuccess();
     }
     serverApi.addEventListener("executed", ({ detail }) => handleEvent("executed", detail));
