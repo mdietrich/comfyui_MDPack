@@ -16,13 +16,37 @@ function isFinal(value) {
     fail("upscaling must be a boolean (or true/false/upscale/generate).");
 }
 
+// Root graph first, then nodes inside (nested) subgraphs. Instances of one
+// subgraph share its interior nodes, so modes apply to every instance.
+function findGraphNodes(graph, nodeId) {
+    const direct = graph?.getNodeById?.(nodeId);
+    if (direct) return [direct];
+    const matches = new Set();
+    const visit = (currentGraph, visitedSubgraphs) => {
+        for (const wrapper of currentGraph?.nodes ?? []) {
+            const subgraph = wrapper?.isSubgraphNode?.() ? wrapper.subgraph : null;
+            if (!subgraph || visitedSubgraphs.has(subgraph)) continue;
+            const inner = subgraph.getNodeById(nodeId);
+            if (inner) matches.add(inner);
+            visit(subgraph, new Set([...visitedSubgraphs, subgraph]));
+        }
+    };
+    visit(graph, new Set());
+    return [...matches];
+}
+
 function configuredNodes(graph) {
     const settings = graph?.extra?.[MARKER];
     if (settings === undefined) return null;
     if (settings?.version !== 1 || !settings.timeline || typeof settings.widget !== "string") {
         fail("invalid workflow configuration.");
     }
-    const findNode = (nodeId) => graph.getNodeById(nodeId) ?? fail(`configured node ${nodeId} is missing.`);
+    const findNode = (nodeId) => {
+        const matches = findGraphNodes(graph, nodeId);
+        if (!matches.length) fail(`configured node ${nodeId} is missing.`);
+        if (matches.length > 1) fail(`configured node ${nodeId} is ambiguous (found in several subgraphs).`);
+        return matches[0];
+    };
     const timeline = findNode(settings.timeline);
     const widget = timeline.widgets?.find((item) => item.name === settings.widget);
     if (!widget) fail(`node ${settings.timeline} is missing widget ${settings.widget}.`);
