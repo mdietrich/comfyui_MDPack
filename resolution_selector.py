@@ -38,6 +38,23 @@ ASPECT_RATIOS: dict[AspectRatio, tuple[int, int]] = {
 }
 
 
+def _resolution_preview_input():
+    """The preview widget as a 0- or 1-element list, depending on the running core.
+
+    ``execute`` already treats ``preview`` as optional, so dropping the widget costs the live
+    preview in the editor and nothing else.
+    """
+    preview = getattr(io, "ResolutionPreview", None)
+    if preview is None:
+        return []
+    return [
+        preview.Input(
+            "preview",
+            tooltip="Live preview of the calculated output resolution.",
+        )
+    ]
+
+
 class MDResolutionSelector(io.ComfyNode):
     """Calculate width and height from aspect ratio and megapixel target."""
 
@@ -64,10 +81,10 @@ class MDResolutionSelector(io.ComfyNode):
                     step=0.1,
                     tooltip="Target total megapixels. 1.0 MP = 1024x1024 for square.",
                 ),
-                io.ResolutionPreview.Input(
-                    "preview",
-                    tooltip="Live preview of the calculated output resolution.",
-                ),
+                # ResolutionPreview arrived in a later core than some pinned deployments run
+                # (it is missing on v0.31.0). Without this guard the AttributeError propagates
+                # out of __init__ and takes the whole pack down, not just this node.
+                *_resolution_preview_input(),
                 io.Int.Input(
                     id="multiple",
                     default=8,
